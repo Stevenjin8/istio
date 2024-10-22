@@ -22,6 +22,7 @@ import (
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	cares "github.com/envoyproxy/go-control-plane/envoy/extensions/network/dns_resolver/cares/v3"
 	http "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"google.golang.org/protobuf/proto"
@@ -48,6 +49,10 @@ import (
 )
 
 var maxSecondsValue = int64((math.MaxInt64 - 999999999) / (1000 * 1000 * 1000)) // 9223372035, which is about 292 years.
+
+// For c-ares DNS resolver
+// https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/network/dns_resolver/cares/v3/cares_dns_resolver.proto
+const udpMaxQueries = 10
 
 // passthroughHttpProtocolOptions are http protocol options used for pass through clusters.
 // nolint
@@ -301,6 +306,17 @@ func (cb *ClusterBuilder) buildCluster(name string, discoveryType cluster.Cluste
 
 	switch discoveryType {
 	case cluster.Cluster_STRICT_DNS, cluster.Cluster_LOGICAL_DNS:
+		dns_resolver_config, err := anypb.New(&cares.CaresDnsResolverConfig{
+			UdpMaxQueries: &wrappers.UInt32Value{Value: udpMaxQueries},
+		})
+		if err != nil {
+			log.Warnf("Could not create typed_dns_cluster_config for %s: %s", name, err)
+		}
+		c.TypedDnsResolverConfig = &core.TypedExtensionConfig{
+			Name:        "envoy.network.dns_resolver.cares",
+			TypedConfig: dns_resolver_config,
+		}
+
 		if networkutil.AllIPv4(cb.proxyIPAddresses) {
 			// IPv4 only
 			c.DnsLookupFamily = cluster.Cluster_V4_ONLY
