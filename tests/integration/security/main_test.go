@@ -66,8 +66,9 @@ meshConfig:
 		})).
 		// Create namespaces first. This way, echo can correctly configure egress to all namespaces.
 		SetupParallel(
+			namespace.Setup(&echo2NS, namespace.Config{Prefix: "echo2", Inject: true})).
+		SetupParallel(
 			namespace.Setup(&echo1NS, namespace.Config{Prefix: "echo1", Inject: true}),
-			namespace.Setup(&echo2NS, namespace.Config{Prefix: "echo2", Inject: true}),
 			namespace.Setup(&externalNS, namespace.Config{Prefix: "external", Inject: false}),
 			namespace.Setup(&serverNS, namespace.Config{Prefix: "servers", Inject: true})).
 		SetupParallel(
