@@ -46,6 +46,7 @@ import (
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/ambient"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/check"
 	"istio.io/istio/pkg/test/framework/components/echo/common"
@@ -359,8 +360,12 @@ func TestServerSideLB(t *testing.T) {
 
 func TestWaypointChanges(t *testing.T) {
 	framework.NewTest(t).Run(func(t framework.TestContext) {
-		getGracePeriod := func(want int64) bool {
-			pods, err := kubetest.NewPodFetch(t.AllClusters()[0], apps.Namespace.Name(), label.IoK8sNetworkingGatewayGatewayName.Name+"=waypoint")()
+		getGracePeriod := func(c cluster.Cluster, want int64) bool {
+			pods, err := kubetest.NewPodFetch(
+				c,
+				apps.Namespace.Name(),
+				label.IoK8sNetworkingGatewayGatewayName.Name+"=waypoint",
+			)()
 			assert.NoError(t, err)
 			for _, p := range pods {
 				grace := p.Spec.TerminationGracePeriodSeconds
@@ -370,20 +375,30 @@ func TestWaypointChanges(t *testing.T) {
 			}
 			return false
 		}
+
 		// check that waypoint deployment is unmodified
-		retry.UntilOrFail(t, func() bool {
-			return getGracePeriod(2)
-		})
+		for _, c := range t.AllClusters() {
+			retry.UntilOrFail(t, func() bool {
+				return getGracePeriod(c, 2)
+			})
+		}
+
 		// change the waypoint template
 		istio.GetOrFail(t).UpdateInjectionConfig(t, func(cfg *inject.Config) error {
 			mainTemplate := file.MustAsString(filepath.Join(env.IstioSrc, templateFile))
-			cfg.RawTemplates["waypoint"] = strings.ReplaceAll(mainTemplate, "terminationGracePeriodSeconds: 2", "terminationGracePeriodSeconds: 3")
+			cfg.RawTemplates["waypoint"] = strings.ReplaceAll(
+				mainTemplate,
+				"serviceAccountName: {{.ServiceAccount | quote}}",
+				"serviceAccountName: {{.ServiceAccount | quote}}\n      terminationGracePeriodSeconds: 3",
+			)
 			return nil
 		}, cleanup.Always)
 
-		retry.UntilOrFail(t, func() bool {
-			return getGracePeriod(3)
-		})
+		for _, c := range t.AllClusters() {
+			retry.UntilOrFail(t, func() bool {
+				return getGracePeriod(c, 3)
+			})
+		}
 	})
 }
 
