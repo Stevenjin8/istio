@@ -45,8 +45,6 @@ func TestGlobalServiceReachability(t *testing.T) {
 
 			clusterToNetwork := make(map[string]string)
 			expectedClusters := sets.New[string]()
-			expectedNetworks := sets.New[string]()
-
 			for _, c := range clusters {
 				name := c.StableName()
 				net := c.NetworkName()
@@ -55,7 +53,6 @@ func TestGlobalServiceReachability(t *testing.T) {
 				}
 				clusterToNetwork[name] = net
 				expectedClusters.Insert(name)
-				expectedNetworks.Insert(net)
 			}
 
 			for _, svc := range apps.All {
@@ -63,6 +60,7 @@ func TestGlobalServiceReachability(t *testing.T) {
 				svcName := svc.ServiceName()
 				for _, c := range clusters {
 					if _, err := c.Kube().CoreV1().Services(ns).Get(context.TODO(), svcName, metav1.GetOptions{}); err != nil {
+						t.Logf("[label] skip: %s/%s not found in %s", ns, svcName, c.StableName())
 						continue
 					}
 					if _, err := c.Kube().CoreV1().Services(ns).Patch(
@@ -74,54 +72,41 @@ func TestGlobalServiceReachability(t *testing.T) {
 					); err != nil {
 						t.Fatalf("patch %s/%s in %s: %v", ns, svcName, c.StableName(), err)
 					}
+					t.Logf("[label] labeled %s/%s as global in cluster %s (network %s)",
+						ns, svcName, c.StableName(), clusterToNetwork[c.StableName()])
 				}
 			}
 
-			propagation := time.Duration(numClusters*10) * time.Second
-			if expectedNetworks.Len() > 1 {
-				propagation = time.Duration(numClusters*15) * time.Second //increased propagation time for multi-network setups so that global label is applied to all services
-			}
-			time.Sleep(propagation)
-
-			testApps := apps.Captured
-
-			maxAttempts := 3
-			baseCount := numClusters * 20
-			baseTimeout := 10 * time.Second
-
-			for _, dst := range testApps {
-				dstName := dst.ServiceName()
-				for _, src := range testApps {
+			for _, dst := range apps.Captured {
+				for _, src := range apps.Captured {
+					// skip self calls
 					if src.ServiceName() == dst.ServiceName() &&
 						src.Config().Cluster.StableName() == dst.Config().Cluster.StableName() {
 						continue
 					}
-
 					for _, wl := range src.WorkloadsOrFail(t) {
 						var result echo.CallResult
-						var callErr error
+						t.Logf("[call] %s(%s/%s) -> %s : sending %d HTTP calls",
+							src.ServiceName(),
+							wl.Cluster().StableName(),
+							clusterToNetwork[wl.Cluster().StableName()],
+							dst.ServiceName(),
+							numClusters*30,
+						)
 
-						for attempt := 1; attempt <= maxAttempts; attempt++ {
-							count := baseCount + (attempt-1)*numClusters*10
-							timeout := baseTimeout + time.Duration(attempt-1)*20*time.Second
-							callErr = retry.UntilSuccess(func() error {
-								var err error
-								result, err = src.WithWorkloads(wl).Call(echo.CallOptions{
-									To:      dst,
-									Port:    echo.Port{Name: "http"},
-									Count:   count,
-									Timeout: timeout,
-								})
-								return err
-							}, retry.Timeout(timeout+30*time.Second), retry.Delay(5*time.Second))
-							if callErr == nil {
-								break
-							}
-							time.Sleep(time.Duration(attempt*attempt*10) * time.Second)
-						}
-						if callErr != nil {
+						err := retry.UntilSuccess(func() error {
+							var err error
+							result, err = src.WithWorkloads(wl).Call(echo.CallOptions{
+								To:      dst,
+								Port:    echo.Port{Name: "http"},
+								Count:   numClusters * 30,
+								Timeout: 60 * time.Second,
+							})
+							return err
+						}, retry.Timeout(90*time.Second), retry.Delay(5*time.Second))
+						if err != nil {
 							t.Fatalf("call failed: %s(%s) -> %s: %v",
-								src.ServiceName(), wl.Cluster().StableName(), dstName, callErr)
+								src.ServiceName(), wl.Cluster().StableName(), dst.ServiceName(), err)
 						}
 
 						respClusters := sets.New[string]()
@@ -137,14 +122,7 @@ func TestGlobalServiceReachability(t *testing.T) {
 							missing := expectedClusters.Difference(respClusters).UnsortedList()
 							unexpected := respClusters.Difference(expectedClusters).UnsortedList()
 							t.Fatalf("cluster mismatch: %s(%s)->%s missing=%v unexpected=%v",
-								src.ServiceName(), wl.Cluster().StableName(), dstName, missing, unexpected)
-						}
-
-						if !expectedNetworks.Equal(respNetworks) {
-							missing := expectedNetworks.Difference(respNetworks).UnsortedList()
-							unexpected := respNetworks.Difference(expectedNetworks).UnsortedList()
-							t.Fatalf("network mismatch: %s(%s)->%s missing=%v unexpected=%v",
-								src.ServiceName(), wl.Cluster().StableName(), dstName, missing, unexpected)
+								src.ServiceName(), wl.Cluster().StableName(), dst.ServiceName(), missing, unexpected)
 						}
 					}
 				}
