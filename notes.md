@@ -8,7 +8,7 @@ Initial build takes a really long time, maybe we should have them do some steps 
 1. launch a codespace from your fork of istio/istio
 1. checkout a feature branch from master, call it what you'd like. Perhaps `contribfest`
     ```shell
-    export TAG=1.29-alpha.5dcad23c9e9086eadce05381890a29dea3f97fb6
+    export TAG=1.29-dev
     export HUB=gcr.io/istio-testing
     ```
 1. `./prow/integ-suite-kind.sh --skip-cleanup --skip-build`
