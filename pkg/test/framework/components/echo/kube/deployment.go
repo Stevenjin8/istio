@@ -420,6 +420,8 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 		"Service":                 cfg.Service,
 		"StatefulSet":             cfg.StatefulSet,
 		"ProxylessGRPC":           cfg.IsProxylessGRPC(),
+		"HasSidecar":              cfg.HasSidecar(),
+		"AmbientPodRuntimeClass":  settings.AmbientPodRuntimeClass,
 		"GRPCMagicPort":           grpcMagicPort,
 		"Locality":                cfg.Locality,
 		"ServiceAccount":          cfg.ServiceAccount,
@@ -440,6 +442,7 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 		"Ambient":                 settings.Ambient,
 		"BindFamily":              cfg.BindFamily,
 		"OpenShift":               settings.OpenShift,
+		"UserNamespace":           cfg.UserNamespace,
 	}
 
 	vmIstioHost, vmIstioIP := "", ""

@@ -183,6 +183,16 @@ message CNIAmbientConfig {
 
   // If enabled, and ambient is enabled, iptables reconciliation will be enabled.
   google.protobuf.BoolValue reconcileIptablesOnStartup = 9;
+
+  // If ambient is enabled, these selectors are used to identify the ambient-enabled pods.
+  repeated google.protobuf.Struct enablementSelectors = 10;
+
+  // If enabled, and ambient is enabled, the CNI agent will always share the network namespace
+  // of the host node it is running on.
+  google.protobuf.BoolValue shareHostNetworkNamespace = 11;
+
+  // If enabled, the CNI plugin will retry checking whether a pod is ambient enabled when there are errors.
+  google.protobuf.BoolValue enableAmbientDetectionRetry = 12;
 }
 
 message CNIRepairConfig {
@@ -657,11 +667,19 @@ message GlobalConfig {
   // If true, install istio-reader service account and associated cluster role/binding,
   // which are used for multicluster remote-secret workflows.
   google.protobuf.BoolValue enableReaderRBAC = 78;
-  // The next available key is 79
+  // Optionally specify a custom service account to bind to the istio-reader ClusterRole.
+  // When set, the default istio-reader-service-account is not created.
+  ReaderServiceAccount readerServiceAccount = 79;
+  // The next available key is 80
 }
 
 message Agentgateway {
   string image = 1;
+}
+
+message ReaderServiceAccount {
+  string name = 1;
+  string namespace = 2;
 }
 
 enum ResourceScope {
