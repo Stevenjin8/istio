@@ -52,6 +52,9 @@ spec:
         proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
 {{- end }}
     spec:
+{{- if and (ne $.AmbientPodRuntimeClass "") (not $.ProxylessGRPC) (not $.HasSidecar) }}
+      runtimeClassName: {{ $.AmbientPodRuntimeClass }}
+{{- end }}
 {{- if $.Ambient }}
       topologySpreadConstraints:
       - topologyKey: "kubernetes.io/hostname"
@@ -70,6 +73,9 @@ spec:
 {{- if ne $.ImagePullSecretName "" }}
       imagePullSecrets:
       - name: {{ $.ImagePullSecretName }}
+{{- end }}
+{{- if $.UserNamespace }}
+      hostUsers: false
 {{- end }}
       containers:
 {{- if and

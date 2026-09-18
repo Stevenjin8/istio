@@ -51,24 +51,46 @@ func TestPluggedInCACRL(t *testing.T) {
 			client.CallOrFail(t, opts)
 			t.Logf("initial mTLS call succeeded")
 
-			// revoke the intermediate certificate
-			util.RevokeIntermediate(t, certBundle)
-
-			// wait for the CRL ConfigMap to be updated
-			util.WaitForCRLUpdate(
-				t,
-				[]string{
-					clientNS.Name(),
-					serverNS.Name(),
-				},
-				certBundle,
-				client,
-				server,
-			)
+			// Revoke the intermediate certificate in each primary cluster where istiod runs and watches the cacerts secret
+			for _, c := range t.AllClusters().Primaries() {
+				certBundle.RevokeOwnIntermediate(t, c)
+				// wait for the CRL ConfigMap to be updated
+				util.WaitForCRLUpdate(
+					t,
+					[]string{
+						clientNS.Name(),
+						serverNS.Name(),
+					},
+					certBundle.Bundle(c),
+					client,
+					server,
+				)
+			}
 
 			// after CRL update, the call should fail
 			opts.Check = check.Error()
 			t.Logf("testing mTLS call after CRL update, expecting failure")
+			retry.UntilSuccessOrFail(t, func() error {
+				client.CallOrFail(t, opts)
+				return nil
+			})
+
+			// removing CRL
+			for _, c := range t.AllClusters().Primaries() {
+				certBundle.RemoveCRL(t, c)
+				// wait for the CRL ConfigMap to be updated
+				util.WaitForCRLUpdate(
+					t,
+					[]string{
+						clientNS.Name(),
+						serverNS.Name(),
+					},
+					certBundle.Bundle(c),
+					client,
+					server,
+				)
+			}
+			opts.Check = nil
 			retry.UntilSuccessOrFail(t, func() error {
 				client.CallOrFail(t, opts)
 				return nil

@@ -420,6 +420,8 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 		"Service":                 cfg.Service,
 		"StatefulSet":             cfg.StatefulSet,
 		"ProxylessGRPC":           cfg.IsProxylessGRPC(),
+		"HasSidecar":              cfg.HasSidecar(),
+		"AmbientPodRuntimeClass":  settings.AmbientPodRuntimeClass,
 		"GRPCMagicPort":           grpcMagicPort,
 		"Locality":                cfg.Locality,
 		"ServiceAccount":          cfg.ServiceAccount,
@@ -440,6 +442,7 @@ func deploymentParams(ctx resource.Context, cfg echo.Config, settings *resource.
 		"Ambient":                 settings.Ambient,
 		"BindFamily":              cfg.BindFamily,
 		"OpenShift":               settings.OpenShift,
+		"UserNamespace":           cfg.UserNamespace,
 	}
 
 	vmIstioHost, vmIstioIP := "", ""
@@ -823,17 +826,17 @@ func getIstioRevision(n namespace.Instance) string {
 }
 
 func statefulsetComplete(statefulset *appsv1.StatefulSet) bool {
-	return statefulset.Status.UpdatedReplicas == *(statefulset.Spec.Replicas) &&
-		statefulset.Status.Replicas == *(statefulset.Spec.Replicas) &&
-		statefulset.Status.AvailableReplicas == *(statefulset.Spec.Replicas) &&
-		statefulset.Status.ReadyReplicas == *(statefulset.Spec.Replicas) &&
+	return statefulset.Status.UpdatedReplicas == *statefulset.Spec.Replicas &&
+		statefulset.Status.Replicas == *statefulset.Spec.Replicas &&
+		statefulset.Status.AvailableReplicas == *statefulset.Spec.Replicas &&
+		statefulset.Status.ReadyReplicas == *statefulset.Spec.Replicas &&
 		statefulset.Status.ObservedGeneration >= statefulset.Generation
 }
 
 func deploymentComplete(deployment *appsv1.Deployment) bool {
-	return deployment.Status.UpdatedReplicas == *(deployment.Spec.Replicas) &&
-		deployment.Status.Replicas == *(deployment.Spec.Replicas) &&
-		deployment.Status.AvailableReplicas == *(deployment.Spec.Replicas) &&
-		deployment.Status.ReadyReplicas == *(deployment.Spec.Replicas) &&
+	return deployment.Status.UpdatedReplicas == *deployment.Spec.Replicas &&
+		deployment.Status.Replicas == *deployment.Spec.Replicas &&
+		deployment.Status.AvailableReplicas == *deployment.Spec.Replicas &&
+		deployment.Status.ReadyReplicas == *deployment.Spec.Replicas &&
 		deployment.Status.ObservedGeneration >= deployment.Generation
 }

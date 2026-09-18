@@ -59,6 +59,11 @@ var (
 	workloadIdentitySocketFile = env.Register("WORKLOAD_IDENTITY_SOCKET_FILE", security.DefaultWorkloadIdentitySocketFile,
 		fmt.Sprintf("SPIRE workload identity SDS socket filename. If set, an SDS socket with this name must exist at %s", security.WorkloadIdentityPath)).Get()
 
+	workloadIdentitySocketTimeout = env.Register("WORKLOAD_IDENTITY_SOCKET_TIMEOUT", security.DefaultWorkloadIdentitySocketTimeout,
+		fmt.Sprintf("How long to wait at startup for the workload identity SDS socket at %s to appear and become healthy. "+
+			"This is useful when an external SDS provider, such as SPIRE, may bind its socket after the agent starts. "+
+			"If zero (the default), the socket is checked once and the agent does not wait.", security.WorkloadIdentityPath)).Get()
+
 	// set to "SYSTEM" for ACME/public signed CA servers.
 	caRootCA = env.Register("CA_ROOT_CA", "",
 		"Explicitly set the root CA to expect for the CA connection.").Get()
@@ -96,6 +101,12 @@ var (
 		"The type of the credential fetcher. Currently supported types include GoogleComputeEngine").Get()
 	credIdentityProvider = env.Register("CREDENTIAL_IDENTITY_PROVIDER", "GoogleComputeEngine",
 		"The identity provider for credential. Currently default supported identity provider is GoogleComputeEngine").Get()
+	// EnableSelfDiscovery controls whether pilot-agent adds a local_cluster static cluster to the bootstrap
+	// for zone-aware routing support. Set ISTIO_META_ENABLE_SELF_DISCOVERY=true via proxyMetadata.
+	EnableSelfDiscovery = env.Register("ISTIO_META_ENABLE_SELF_DISCOVERY", false,
+		"If set to true, pilot-agent will configure a local_cluster static cluster in the Envoy bootstrap "+
+			"to support zone-aware load balancing.")
+
 	// DNSCaptureByAgent is a copy of the env var in the init code.
 	DNSCaptureByAgent = env.Register("ISTIO_META_DNS_CAPTURE", false,
 		"If set to true, enable the capture of outgoing DNS packets on port 53, redirecting to istio-agent on :15053")

@@ -136,7 +136,7 @@ func getGvk(obj any) (config.GroupVersionKind, bool) {
 		return gvk.Sidecar, true
 	case *k8sioapiappsv1.StatefulSet:
 		return gvk.StatefulSet, true
-	case *sigsk8siogatewayapiapisv1alpha2.TCPRoute:
+	case *sigsk8siogatewayapiapisv1.TCPRoute:
 		return gvk.TCPRoute, true
 	case *sigsk8siogatewayapiapisv1.TLSRoute:
 		return gvk.TLSRoute, true
@@ -168,6 +168,8 @@ func getGvk(obj any) (config.GroupVersionKind, bool) {
 		return gvk.WorkloadGroup, true
 	case *apiistioioapinetworkingv1.WorkloadGroup:
 		return gvk.WorkloadGroup, true
+	case *sigsk8siogatewayapiapisxv1alpha1.XBackend:
+		return gvk.XBackend, true
 	case *sigsk8siogatewayapiapisxv1alpha1.XBackendTrafficPolicy:
 		return gvk.XBackendTrafficPolicy, true
 	default:

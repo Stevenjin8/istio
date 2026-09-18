@@ -34,6 +34,7 @@ import (
 	headerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/http/stateful_session/header/v3"
 	httpv3 "github.com/envoyproxy/go-control-plane/envoy/type/http/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -80,6 +81,13 @@ const (
 
 	// Inbound pass through cluster need to the bind the loopback ip address for the security and loop avoidance.
 	InboundPassthroughCluster = "InboundPassthroughCluster"
+
+	// SelfDiscoveryCluster is the self-discovery static cluster injected into the Envoy bootstrap when
+	// ISTIO_META_ENABLE_SELF_DISCOVERY is set. It mirrors the proxy's own service endpoints within
+	// its region and is referenced as cluster_manager.local_cluster_name so Envoy can compute the
+	// per-zone host distribution used by zone-aware load balancing. This value must stay in sync with
+	// the "local_cluster" name hardcoded in the envoy bootstrap template.
+	SelfDiscoveryCluster = "local_cluster"
 
 	// IstioMetadataKey is the key under which metadata is added to a route or cluster
 	// regarding the virtual service or destination rule used for each
@@ -131,6 +139,32 @@ func SelectDNSLookupFamily(proxyIPAddresses []string) cluster.Cluster_DnsLookupF
 		}
 		return cluster.Cluster_V4_ONLY
 	}
+}
+
+// GetDNSProxyAddress returns the configured DNS proxy address. Localhost and fallback addresses
+// use the proxy's IP family; IPv4 is used when the proxy IPs are unknown or dual stack.
+func GetDNSProxyAddress(proxyIPAddresses []string, dnsProxyAddr string) *core.Address {
+	localhost := model.LocalhostAddressPrefix
+	if len(proxyIPAddresses) > 0 && networkutil.AllIPv6(proxyIPAddresses) {
+		localhost = model.LocalhostIPv6AddressPrefix
+	}
+	fallbackAddr := net.JoinHostPort(localhost, "15053")
+	if dnsProxyAddr == "" {
+		dnsProxyAddr = fallbackAddr
+	}
+	host, portStr, err := net.SplitHostPort(dnsProxyAddr)
+	if err != nil {
+		log.Warnf("failed to parse DNSProxyAddr %q, falling back to %s: %v", dnsProxyAddr, fallbackAddr, err)
+		host, portStr = localhost, "15053"
+	}
+	if host == "localhost" {
+		host = localhost
+	}
+	port, err := strconv.ParseUint(portStr, 10, 32)
+	if err != nil {
+		port = 15053
+	}
+	return BuildAddress(host, uint32(port))
 }
 
 // ALPNH2Only advertises that Proxy is going to use HTTP/2 when talking to the cluster.
@@ -474,6 +508,16 @@ func IsHTTPFilterChain(filterChain *listener.FilterChain) bool {
 // MergeAnyWithAny merges a given any typed message into the given Any typed message by dynamically inferring the
 // type of Any
 func MergeAnyWithAny(dst *anypb.Any, src *anypb.Any) (*anypb.Any, error) {
+	return mergeAnyWithAny(dst, src, merge.Merge)
+}
+
+// MergeAnyWithAnyReplaceList behaves like MergeAnyWithAny, except that repeated (list) fields
+// present in src fully replace the corresponding list in dst instead of being appended to it.
+func MergeAnyWithAnyReplaceList(dst *anypb.Any, src *anypb.Any) (*anypb.Any, error) {
+	return mergeAnyWithAny(dst, src, merge.MergeWithReplaceList)
+}
+
+func mergeAnyWithAny(dst *anypb.Any, src *anypb.Any, mergeFn func(dst, src proto.Message)) (*anypb.Any, error) {
 	// Assuming that Pilot is compiled with this type [which should always be the case]
 	var err error
 
@@ -490,7 +534,7 @@ func MergeAnyWithAny(dst *anypb.Any, src *anypb.Any) (*anypb.Any, error) {
 	}
 
 	// Merge the two typed protos
-	merge.Merge(dstX, srcX)
+	mergeFn(dstX, srcX)
 
 	// Convert the merged proto back to dst
 	retVal := protoconv.MessageToAny(dstX)
@@ -896,38 +940,9 @@ func MergeSubsetTrafficPolicy(original, subsetPolicy *networking.TrafficPolicy, 
 
 	// merge DR with subset traffic policy
 	// Override with subset values.
-	mergedPolicy := ShallowCopyTrafficPolicy(original)
+	mergedPolicy := model.ShallowCopyTrafficPolicy(original)
 
-	return mergeTrafficPolicy(mergedPolicy, subsetPolicy, hasPortLevel)
-}
-
-// Note that port-level settings will override the destination-level settings.
-// Traffic settings specified at the destination-level will not be inherited when overridden by port-level settings,
-// i.e. default values will be applied to fields omitted in port-level traffic policies.
-func mergeTrafficPolicy(mergedPolicy, subsetPolicy *networking.TrafficPolicy, hasPortLevel bool) *networking.TrafficPolicy {
-	if subsetPolicy.ConnectionPool != nil || hasPortLevel {
-		mergedPolicy.ConnectionPool = subsetPolicy.ConnectionPool
-	}
-	if subsetPolicy.OutlierDetection != nil || hasPortLevel {
-		mergedPolicy.OutlierDetection = subsetPolicy.OutlierDetection
-	}
-	if subsetPolicy.LoadBalancer != nil || hasPortLevel {
-		mergedPolicy.LoadBalancer = subsetPolicy.LoadBalancer
-	}
-	if subsetPolicy.Tls != nil || hasPortLevel {
-		mergedPolicy.Tls = subsetPolicy.Tls
-	}
-
-	if subsetPolicy.Tunnel != nil {
-		mergedPolicy.Tunnel = subsetPolicy.Tunnel
-	}
-	if subsetPolicy.ProxyProtocol != nil {
-		mergedPolicy.ProxyProtocol = subsetPolicy.ProxyProtocol
-	}
-	if subsetPolicy.RetryBudget != nil {
-		mergedPolicy.RetryBudget = subsetPolicy.RetryBudget
-	}
-	return mergedPolicy
+	return model.MergeTrafficPolicy(mergedPolicy, subsetPolicy, hasPortLevel)
 }
 
 func shadowCopyPortTrafficPolicy(portTrafficPolicy *networking.TrafficPolicy_PortTrafficPolicy) *networking.TrafficPolicy {
@@ -939,22 +954,6 @@ func shadowCopyPortTrafficPolicy(portTrafficPolicy *networking.TrafficPolicy_Por
 	ret.LoadBalancer = portTrafficPolicy.LoadBalancer
 	ret.OutlierDetection = portTrafficPolicy.OutlierDetection
 	ret.Tls = portTrafficPolicy.Tls
-	return ret
-}
-
-// ShallowCopyTrafficPolicy shallow copy a traffic policy, portLevelSettings are ignored.
-func ShallowCopyTrafficPolicy(original *networking.TrafficPolicy) *networking.TrafficPolicy {
-	if original == nil {
-		return nil
-	}
-	ret := &networking.TrafficPolicy{}
-	ret.ConnectionPool = original.ConnectionPool
-	ret.LoadBalancer = original.LoadBalancer
-	ret.OutlierDetection = original.OutlierDetection
-	ret.Tls = original.Tls
-	ret.Tunnel = original.Tunnel
-	ret.ProxyProtocol = original.ProxyProtocol
-	ret.RetryBudget = original.RetryBudget
 	return ret
 }
 
