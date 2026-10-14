@@ -25,7 +25,6 @@ import (
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/networking/util"
 	"istio.io/istio/pilot/pkg/util/protoconv"
 	"istio.io/istio/pilot/pkg/util/runtime"
 	"istio.io/istio/pkg/log"
@@ -112,8 +111,8 @@ func patchListener(patchContext networking.EnvoyFilter_PatchContext,
 			// empty name means this listener will be removed, we can return directly.
 			lis.Name = ""
 			return
-		} else if lp.Operation == networking.EnvoyFilter_Patch_MERGE {
-			merge.Merge(lis, lp.Value)
+		} else if isMergeOperation(lp.Operation) {
+			mergePatchValue(lp.Operation, lis, lp.Value)
 		}
 	}
 	patchListenerFilters(patchContext, patches[networking.EnvoyFilter_LISTENER_FILTER], lis)
@@ -190,7 +189,7 @@ func patchListenerFilters(patchContext networking.EnvoyFilter_PatchContext,
 			lis.ListenerFilters = slices.FilterInPlace(lis.ListenerFilters, func(filter *listener.ListenerFilter) bool {
 				return !listenerFilterMatch(filter, lp)
 			})
-		case networking.EnvoyFilter_Patch_MERGE:
+		case networking.EnvoyFilter_Patch_MERGE, networking.EnvoyFilter_Patch_MERGE_AND_REPLACE_LIST:
 			if !hasListenerFilterMatch(lp) {
 				continue
 			}
@@ -259,14 +258,14 @@ func patchFilterChain(patchContext networking.EnvoyFilter_PatchContext,
 			// nil means this filter chain will be removed, we can return directly.
 			fc.Filters = nil
 			return
-		} else if lp.Operation == networking.EnvoyFilter_Patch_MERGE {
+		} else if isMergeOperation(lp.Operation) {
 			merged, err := mergeTransportSocketListener(fc, lp)
 			if err != nil {
 				log.Debugf("merge of transport socket failed for listener: %v", err)
 				continue
 			}
 			if !merged {
-				merge.Merge(fc, lp.Value)
+				mergePatchValue(lp.Operation, fc, lp.Value)
 			}
 		}
 	}
@@ -277,7 +276,7 @@ func patchFilterChain(patchContext networking.EnvoyFilter_PatchContext,
 // Returns a boolean indicating if the merge was handled by this function; if false, it should still be called
 // outside of this function.
 func mergeTransportSocketListener(fc *listener.FilterChain, lp *model.EnvoyFilterConfigPatchWrapper) (merged bool, err error) {
-	lpValueCast, ok := (lp.Value).(*listener.FilterChain)
+	lpValueCast, ok := lp.Value.(*listener.FilterChain)
 	if !ok {
 		return false, fmt.Errorf("cast of cp.Value failed: %v", ok)
 	}
@@ -302,9 +301,9 @@ func mergeTransportSocketListener(fc *listener.FilterChain, lp *model.EnvoyFilte
 
 		if dstListener != nil && srcPatch != nil {
 
-			retVal, errMerge := util.MergeAnyWithAny(dstListener, srcPatch)
+			retVal, errMerge := mergeAnyPatchValue(lp.Operation, dstListener, srcPatch)
 			if errMerge != nil {
-				return false, fmt.Errorf("function mergeAnyWithAny failed for doFilterChainOperation: %v", errMerge)
+				return false, fmt.Errorf("function mergeAnyPatchValue failed for doFilterChainOperation: %v", errMerge)
 			}
 
 			// Merge the above result with the whole listener
@@ -398,7 +397,7 @@ func patchNetworkFilter(patchContext networking.EnvoyFilter_PatchContext,
 			IncrementEnvoyFilterMetric(lp.Key(), NetworkFilter, false)
 			continue
 		}
-		if lp.Operation == networking.EnvoyFilter_Patch_MERGE {
+		if isMergeOperation(lp.Operation) {
 			// proto merge doesn't work well when merging two filters with ANY typed configs
 			// especially when the incoming cp.Value is a struct that could contain the json config
 			// of an ANY typed filter. So convert our filter's typed config to Struct (retaining the any
@@ -420,7 +419,7 @@ func patchNetworkFilter(patchContext networking.EnvoyFilter_PatchContext,
 			var retVal *anypb.Any
 			if userFilter.GetTypedConfig() != nil {
 				IncrementEnvoyFilterMetric(lp.Key(), NetworkFilter, true)
-				if retVal, err = util.MergeAnyWithAny(filter.GetTypedConfig(), userFilter.GetTypedConfig()); err != nil {
+				if retVal, err = mergeAnyPatchValue(lp.Operation, filter.GetTypedConfig(), userFilter.GetTypedConfig()); err != nil {
 					retVal = filter.GetTypedConfig()
 				}
 			}
@@ -539,7 +538,7 @@ func mergeHTTPFilter(patchContext networking.EnvoyFilter_PatchContext,
 			IncrementEnvoyFilterMetric(lp.Key(), HttpFilter, applied)
 			continue
 		}
-		if lp.Operation == networking.EnvoyFilter_Patch_MERGE {
+		if isMergeOperation(lp.Operation) {
 			// proto merge doesn't work well when merging two filters with ANY typed configs
 			// especially when the incoming cp.Value is a struct that could contain the json config
 			// of an ANY typed filter. So convert our filter's typed config to Struct (retaining the any
@@ -560,7 +559,7 @@ func mergeHTTPFilter(patchContext networking.EnvoyFilter_PatchContext,
 			}
 			var retVal *anypb.Any
 			if userHTTPFilter.GetTypedConfig() != nil {
-				if retVal, err = util.MergeAnyWithAny(httpFilter.GetTypedConfig(), userHTTPFilter.GetTypedConfig()); err != nil {
+				if retVal, err = mergeAnyPatchValue(lp.Operation, httpFilter.GetTypedConfig(), userHTTPFilter.GetTypedConfig()); err != nil {
 					retVal = httpFilter.GetTypedConfig()
 				}
 			}
@@ -590,7 +589,7 @@ func mergeListenerFilter(lp *model.EnvoyFilterConfigPatchWrapper, lisFilter *lis
 		retVal *anypb.Any
 	)
 	if userListenerFilter.GetTypedConfig() != nil {
-		if retVal, err = util.MergeAnyWithAny(lisFilter.GetTypedConfig(), userListenerFilter.GetTypedConfig()); err != nil {
+		if retVal, err = mergeAnyPatchValue(lp.Operation, lisFilter.GetTypedConfig(), userListenerFilter.GetTypedConfig()); err != nil {
 			retVal = lisFilter.GetTypedConfig()
 		}
 	}
@@ -671,6 +670,20 @@ func filterChainMatch(listener *listener.Listener, fc *listener.FilterChain, lp 
 
 	if match.TransportProtocol != "" {
 		if fc.FilterChainMatch == nil || fc.FilterChainMatch.TransportProtocol != match.TransportProtocol {
+			return false
+		}
+	}
+
+	// Check the transport socket the filter chain is configured with. Unlike TransportProtocol, which is
+	// a match criteria of the filter chain, this is the extension that actually processes the bytes of a
+	// matched connection, so it identifies the filter chains that terminate TLS or QUIC. A filter chain
+	// with no transport socket set uses raw_buffer, which is Envoy's default.
+	if match.TransportSocket != "" {
+		transportSocket := fc.GetTransportSocket().GetName()
+		if transportSocket == "" {
+			transportSocket = wellknown.TransportSocketRawBuffer
+		}
+		if transportSocket != match.TransportSocket {
 			return false
 		}
 	}

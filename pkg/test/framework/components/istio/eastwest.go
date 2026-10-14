@@ -57,7 +57,6 @@ func (i *istioImpl) deployEastWestGateway(cluster cluster.Cluster, revision stri
 		"--cluster", cluster.Name(),
 		"--network", cluster.NetworkName(),
 		"--revision", revision,
-		"--mesh", meshID,
 	}
 	if !i.env.IsMultiCluster() {
 		args = []string{"--single-cluster"}
@@ -136,7 +135,6 @@ func (i *istioImpl) deployAmbientEastWestGateway(cluster cluster.Cluster) error 
 	args := []string{
 		"--cluster", cluster.Name(),
 		"--network", cluster.NetworkName(),
-		"--mesh", meshID,
 		"--ambient",
 	}
 	if !i.env.IsMultiCluster() {
@@ -147,7 +145,7 @@ func (i *istioImpl) deployAmbientEastWestGateway(cluster cluster.Cluster) error 
 	if err != nil {
 		return fmt.Errorf("failed generating eastwest gateway yaml: %v: %v", err, string(gw))
 	}
-	if err = i.ctx.ConfigKube(cluster).YAML(i.cfg.SystemNamespace, string(gw)).Apply(applyopt.NoCleanup); err != nil {
+	if err = i.ctx.ConfigKube(cluster).YAML(i.cfg.SystemNamespace, string(gw)).Apply(applyopt.CleanupConditionally); err != nil {
 		return fmt.Errorf("failed applying eastwest gateway yaml: %v", err)
 	}
 

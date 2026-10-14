@@ -686,10 +686,13 @@ var (
 		Group:      "gateway.networking.k8s.io",
 		Kind:       "TCPRoute",
 		Plural:     "tcproutes",
-		Version:    "v1alpha2",
-		Proto:      "k8s.io.gateway_api.api.v1alpha1.TCPRouteSpec", StatusProto: "k8s.io.gateway_api.api.v1alpha1.TCPRouteStatus",
-		ReflectType: reflect.TypeOf(&sigsk8siogatewayapiapisv1alpha2.TCPRouteSpec{}).Elem(), StatusType: reflect.TypeOf(&sigsk8siogatewayapiapisv1alpha2.TCPRouteStatus{}).Elem(),
-		ProtoPackage: "sigs.k8s.io/gateway-api/apis/v1alpha2", StatusPackage: "sigs.k8s.io/gateway-api/apis/v1alpha2",
+		Version:    "v1",
+		VersionAliases: []string{
+			"v1alpha2",
+		},
+		Proto: "k8s.io.gateway_api.api.v1.TCPRouteSpec", StatusProto: "k8s.io.gateway_api.api.v1.TCPRouteStatus",
+		ReflectType: reflect.TypeOf(&sigsk8siogatewayapiapisv1.TCPRouteSpec{}).Elem(), StatusType: reflect.TypeOf(&sigsk8siogatewayapiapisv1.TCPRouteStatus{}).Elem(),
+		ProtoPackage: "sigs.k8s.io/gateway-api/apis/v1", StatusPackage: "sigs.k8s.io/gateway-api/apis/v1",
 		ClusterScoped: false,
 		Synthetic:     false,
 		Builtin:       false,
@@ -849,6 +852,21 @@ var (
 		ValidateProto: validation.ValidateWorkloadGroup,
 	}.MustBuild()
 
+	XBackend = resource.Builder{
+		Identifier: "XBackend",
+		Group:      "gateway.networking.x-k8s.io",
+		Kind:       "XBackend",
+		Plural:     "xbackends",
+		Version:    "v1alpha1",
+		Proto:      "k8s.io.gateway_api.apix.v1alpha1.BackendSpec", StatusProto: "BackendStatus",
+		ReflectType: reflect.TypeOf(&sigsk8siogatewayapiapisxv1alpha1.BackendSpec{}).Elem(), StatusType: reflect.TypeOf(&sigsk8siogatewayapiapisxv1alpha1.BackendStatus{}).Elem(),
+		ProtoPackage: "sigs.k8s.io/gateway-api/apisx/v1alpha1", StatusPackage: "sigs.k8s.io/gateway-api/apisx/v1alpha1",
+		ClusterScoped: false,
+		Synthetic:     false,
+		Builtin:       false,
+		ValidateProto: validation.EmptyValidate,
+	}.MustBuild()
+
 	XBackendTrafficPolicy = resource.Builder{
 		Identifier: "XBackendTrafficPolicy",
 		Group:      "gateway.networking.x-k8s.io",
@@ -916,6 +934,7 @@ var (
 		MustAdd(WasmPlugin).
 		MustAdd(WorkloadEntry).
 		MustAdd(WorkloadGroup).
+		MustAdd(XBackend).
 		MustAdd(XBackendTrafficPolicy).
 		Build()
 
@@ -954,6 +973,7 @@ var (
 		MustAdd(TLSRoute).
 		MustAdd(UDPRoute).
 		MustAdd(ValidatingWebhookConfiguration).
+		MustAdd(XBackend).
 		MustAdd(XBackendTrafficPolicy).
 		Build()
 
@@ -1003,6 +1023,7 @@ var (
 			MustAdd(WasmPlugin).
 			MustAdd(WorkloadEntry).
 			MustAdd(WorkloadGroup).
+			MustAdd(XBackend).
 			MustAdd(XBackendTrafficPolicy).
 			Build()
 
@@ -1024,6 +1045,7 @@ var (
 				MustAdd(RequestAuthentication).
 				MustAdd(ServiceEntry).
 				MustAdd(Sidecar).
+				MustAdd(TCPRoute).
 				MustAdd(TLSRoute).
 				MustAdd(Telemetry).
 				MustAdd(TrafficExtension).

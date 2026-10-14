@@ -20,7 +20,7 @@ webhooks:
       {{- else }}
       service:
         name: istiod{{- if not (eq .Values.revision "") }}-{{ .Values.revision }}{{- end }}
-        namespace: {{ .Values.global.istioNamespace }}
+        namespace: {{ .Values.global.istioNamespace | quote }}
         path: "/validate"
       {{- end }}
     rules:
@@ -36,7 +36,14 @@ webhooks:
           - "*"
         resources:
           - "*"
+    {{- if .Values.base.validationFailurePolicy }}
+    failurePolicy: {{ .Values.base.validationFailurePolicy }}
+    {{- else if not .Release.IsUpgrade }}
+    # Fail open until the validation webhook is ready. The webhook controller
+    # will update this to `Fail` and patch in the `caBundle` when the webhook
+    # endpoint is ready.
     failurePolicy: Ignore
+    {{- end }}
     sideEffects: None
     admissionReviewVersions: ["v1"]
     objectSelector:

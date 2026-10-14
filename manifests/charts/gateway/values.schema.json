@@ -191,6 +191,9 @@
             "externalTrafficPolicy": {
               "type": "string"
             },
+            "healthCheckNodePort": {
+              "type": "integer"
+            },
             "loadBalancerIP": {
               "type": "string"
             },
@@ -284,6 +287,9 @@
               },
               "protocol": {
                 "type": "string"
+              },
+              "nodePort": {
+                "type": "integer"
               }
             },
             "required": ["port"]
@@ -333,6 +339,12 @@
               ]
             }
           }
+        },
+        "dnsPolicy": {
+          "type": "string"
+        },
+        "dnsConfig": {
+          "type": "object"
         },
         "terminationGracePeriodSeconds": {
           "type": "number"

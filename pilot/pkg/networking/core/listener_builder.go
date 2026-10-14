@@ -66,6 +66,10 @@ type ListenerBuilder struct {
 
 	envoyFilterWrapper *model.MergedEnvoyFilterWrapper
 
+	// connectionSettings caches the resolved ProxyConfig ConnectionSettings for this proxy,
+	// with EDGE profile defaults applied for Router proxies. Computed once in NewListenerBuilder.
+	connectionSettings *meshconfig.ProxyConfig_ConnectionSettings
+
 	// authnBuilder provides access to authn (mTLS) configuration for the given proxy.
 	authnBuilder *authn.Builder
 	// authzBuilder provides access to authz configuration for the given proxy.
@@ -82,8 +86,9 @@ type enabledInspector struct {
 
 func NewListenerBuilder(node *model.Proxy, push *model.PushContext) *ListenerBuilder {
 	builder := &ListenerBuilder{
-		node: node,
-		push: push,
+		node:               node,
+		push:               push,
+		connectionSettings: resolveConnectionSettings(node, push),
 	}
 	builder.authnBuilder = authn.NewBuilder(push, node)
 	builder.authzBuilder = authz.NewBuilder(authz.Local, push, node, node.Type == model.Waypoint)
@@ -434,6 +439,11 @@ func (lb *ListenerBuilder) buildHTTPConnectionManager(httpOpts *httpListenerOpts
 
 	connectionManager.StreamIdleTimeout = durationpb.New(0 * time.Second)
 
+	// Apply resolved ConnectionSettings (see resolveConnectionSettings; EDGE defaulting
+	// happens there). Explicit values override MeshConfig path normalization and the
+	// default StreamIdleTimeout above.
+	applyConnectionSettingsToHCM(connectionManager, lb.connectionSettings)
+
 	if httpOpts.rds != "" {
 		rds := &hcm.HttpConnectionManager_Rds{
 			Rds: &hcm.Rds{
@@ -466,6 +476,13 @@ func (lb *ListenerBuilder) buildHTTPConnectionManager(httpOpts *httpListenerOpts
 		// Metadata exchange filter needs to be added before any other HTTP filters are added. This is done to
 		// ensure that mx filter comes before HTTP RBAC filter. This is related to https://github.com/istio/istio/issues/41066
 		filters = appendMxFilter(httpOpts, filters)
+		if fccd := httpOpts.connectionManager.GetForwardClientCertDetails(); lb.node.Type == model.SidecarProxy &&
+			httpOpts.hbone && httpOpts.class == istionetworking.ListenerClassSidecarInbound &&
+			(fccd == hcm.HttpConnectionManager_APPEND_FORWARD || fccd == hcm.HttpConnectionManager_SANITIZE_SET) {
+			// synthensize XFCC if permitted
+			// See: https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto
+			filters = append(filters, xdsfilters.SidecarXFCCClientIdentityFilter(fccd == hcm.HttpConnectionManager_SANITIZE_SET))
+		}
 		// TODO: how to deal with ext-authz? It will be in the ordering twice
 		filters = append(filters, lb.authzCustomBuilder.BuildHTTP(httpOpts.class)...)
 		filters = extension.PopAppendHTTPTrafficExtension(filters, trafficExtensions, extensions.TrafficExtension_AUTHN)

@@ -335,7 +335,7 @@ func buildSidecarVirtualHostForService(svc *model.Service,
 	httpRoute := BuildDefaultHTTPOutboundRoute(cluster, traceOperation, push.Mesh)
 
 	// if this host has no virtualservice, the consistentHash on its destinationRule will be useless
-	hashPolicy := consistentHashToHashPolicy(hash)
+	hashPolicy := ConsistentHashToHashPolicy(hash)
 	if hashPolicy != nil {
 		httpRoute.GetRoute().HashPolicy = []*route.RouteAction_HashPolicy{hashPolicy}
 	}
@@ -511,40 +511,6 @@ func TranslateRoute(
 	}
 
 	var hostnames []host.Name
-	if infPoolRouteRuleCfg, ok := opts.InferencePoolExtensionRefs[in.Name]; ok {
-		// This route has an inference pool config, set up ext_proc
-		extSvcHost := host.Name(infPoolRouteRuleCfg.FQDN)
-		extPortNum, _ := strconv.Atoi(infPoolRouteRuleCfg.Port)
-		if out.TypedPerFilterConfig == nil {
-			out.TypedPerFilterConfig = make(map[string]*anypb.Any)
-		}
-		out.TypedPerFilterConfig[wellknown.HTTPExternalProcessing] = protoconv.MessageToAny(&extproc.ExtProcPerRoute{
-			Override: &extproc.ExtProcPerRoute_Overrides{
-				Overrides: &extproc.ExtProcOverrides{
-					FailureModeAllow: &wrapperspb.BoolValue{Value: infPoolRouteRuleCfg.FailureModeAllow},
-					GrpcService: &core.GrpcService{
-						TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
-							EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-								ClusterName: model.BuildSubsetKey(model.TrafficDirectionOutbound, "", extSvcHost, extPortNum),
-							},
-						},
-					},
-					ProcessingMode: &extproc.ProcessingMode{
-						RequestHeaderMode: extproc.ProcessingMode_SEND,
-						// open AI standard includes the model and other information the ext_proc server needs in the request body
-						RequestBodyMode: extproc.ProcessingMode_FULL_DUPLEX_STREAMED,
-						// If the ext_proc server has the request_body_mode set to FULL_DUPLEX_STREAMED, then the request_trailer_mode has to be set to SEND
-						RequestTrailerMode: extproc.ProcessingMode_SEND,
-						ResponseHeaderMode: extproc.ProcessingMode_SEND,
-						// GIE collects statistics present in the open AI standard response message
-						ResponseBodyMode: extproc.ProcessingMode_FULL_DUPLEX_STREAMED,
-						// If the ext_proc server has the response_body_mode set to FULL_DUPLEX_STREAMED, then the response_trailer_mode has to be set to SEND
-						ResponseTrailerMode: extproc.ProcessingMode_SEND,
-					},
-				},
-			},
-		})
-	}
 	if in.Redirect != nil {
 		ApplyRedirect(out, in.Redirect, listenPort, opts.IsTLS)
 	} else if in.DirectResponse != nil {
@@ -556,7 +522,7 @@ func TranslateRoute(
 	out.Decorator = &route.Decorator{
 		Operation: GetRouteOperation(out, virtualService.Name, listenPort),
 	}
-	if in.Fault != nil || in.CorsPolicy != nil {
+	if (in.Fault != nil || in.CorsPolicy != nil) && out.TypedPerFilterConfig == nil {
 		out.TypedPerFilterConfig = make(map[string]*anypb.Any)
 	}
 	if in.Fault != nil {
@@ -682,11 +648,23 @@ func applyHTTPRouteDestination(
 		// No VS policy set, use mesh defaults
 		policy = opts.Mesh.GetDefaultHttpRetryPolicy()
 	}
+	// An endpoint picker belongs to an InferencePool backendRef, not to the rule as a whole: a
+	// rule may weight traffic across several pools, and each pool's share has to be scored by
+	// that pool's own picker. So the ext_proc override goes wherever the backend's cluster went -
+	// on the route itself for a single destination, on each weighted cluster otherwise.
+	infPoolCfg := opts.InferencePoolExtensionRefs[in.Name]
+
 	consistentHash := false
 	if len(in.Route) == 1 {
 		hostnames = append(hostnames, processDestination(in.Route[0], opts, listenerPort, out, action))
 		hash := opts.LookupHash(in.Route[0])
 		consistentHash = hash != nil
+		if cfg, ok := infPoolCfg[in.Route[0].GetDestination().GetHost()]; ok {
+			if out.TypedPerFilterConfig == nil {
+				out.TypedPerFilterConfig = make(map[string]*anypb.Any)
+			}
+			out.TypedPerFilterConfig[wellknown.HTTPExternalProcessing] = buildExtProcPerRoute(cfg)
+		}
 	} else {
 		weighted := make([]*route.WeightedCluster_ClusterWeight, 0)
 		for _, dst := range in.Route {
@@ -695,6 +673,17 @@ func applyHTTPRouteDestination(
 				continue
 			}
 			destinationweight, hostname := processWeightedDestination(dst, opts, listenerPort, action)
+			if cfg, ok := infPoolCfg[dst.GetDestination().GetHost()]; ok {
+				destinationweight.TypedPerFilterConfig = map[string]*anypb.Any{
+					wellknown.HTTPExternalProcessing: buildExtProcPerRoute(cfg),
+				}
+			} else if len(infPoolCfg) > 0 {
+				// An ordinary backend sharing a rule with an InferencePool. It belongs to no pool,
+				// so no picker may claim it.
+				destinationweight.TypedPerFilterConfig = map[string]*anypb.Any{
+					wellknown.HTTPExternalProcessing: extProcDisabled,
+				}
+			}
 			weighted = append(weighted, destinationweight)
 			hostnames = append(hostnames, hostname)
 		}
@@ -706,6 +695,44 @@ func applyHTTPRouteDestination(
 	}
 	action.RetryPolicy = retry.ConvertPolicy(policy, consistentHash)
 	return hostnames
+}
+
+// extProcDisabled turns ext_proc off for one backend. Used for a backend that shares a route
+// rule with an InferencePool but is not one itself.
+var extProcDisabled = protoconv.MessageToAny(&extproc.ExtProcPerRoute{
+	Override: &extproc.ExtProcPerRoute_Disabled{Disabled: true},
+})
+
+// buildExtProcPerRoute returns the ext_proc override that sends requests for one InferencePool
+// backendRef to that pool's endpoint picker.
+func buildExtProcPerRoute(cfg kube.InferencePoolBackendConfig) *anypb.Any {
+	extPortNum, _ := strconv.Atoi(cfg.Port)
+	return protoconv.MessageToAny(&extproc.ExtProcPerRoute{
+		Override: &extproc.ExtProcPerRoute_Overrides{
+			Overrides: &extproc.ExtProcOverrides{
+				FailureModeAllow: &wrapperspb.BoolValue{Value: cfg.FailureModeAllow},
+				GrpcService: &core.GrpcService{
+					TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+						EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
+							ClusterName: model.BuildSubsetKey(model.TrafficDirectionOutbound, "", host.Name(cfg.FQDN), extPortNum),
+						},
+					},
+				},
+				ProcessingMode: &extproc.ProcessingMode{
+					RequestHeaderMode: extproc.ProcessingMode_SEND,
+					// open AI standard includes the model and other information the ext_proc server needs in the request body
+					RequestBodyMode: extproc.ProcessingMode_FULL_DUPLEX_STREAMED,
+					// If the ext_proc server has the request_body_mode set to FULL_DUPLEX_STREAMED, then the request_trailer_mode has to be set to SEND
+					RequestTrailerMode: extproc.ProcessingMode_SEND,
+					ResponseHeaderMode: extproc.ProcessingMode_SEND,
+					// GIE collects statistics present in the open AI standard response message
+					ResponseBodyMode: extproc.ProcessingMode_FULL_DUPLEX_STREAMED,
+					// If the ext_proc server has the response_body_mode set to FULL_DUPLEX_STREAMED, then the response_trailer_mode has to be set to SEND
+					ResponseTrailerMode: extproc.ProcessingMode_SEND,
+				},
+			},
+		},
+	})
 }
 
 // processDestination processes a single destination in a route. It specifies to which cluster the route should
@@ -734,7 +761,7 @@ func processDestination(dst *networking.HTTPRouteDestination, opts RouteOptions,
 		}
 	}
 	hash := opts.LookupHash(dst)
-	hashPolicy := consistentHashToHashPolicy(hash)
+	hashPolicy := ConsistentHashToHashPolicy(hash)
 	if hashPolicy != nil {
 		action.HashPolicy = append(action.HashPolicy, hashPolicy)
 	}
@@ -769,7 +796,7 @@ func processWeightedDestination(
 		}
 	}
 	hash := opts.LookupHash(dst)
-	hashPolicy := consistentHashToHashPolicy(hash)
+	hashPolicy := ConsistentHashToHashPolicy(hash)
 	if hashPolicy != nil {
 		action.HashPolicy = append(action.HashPolicy, hashPolicy)
 	}
@@ -914,7 +941,7 @@ func MirrorPercent(in *networking.HTTPRoute) *core.RuntimeFractionalPercent {
 	case in.MirrorPercent != nil:
 		if in.MirrorPercent.GetValue() > 0 {
 			return &core.RuntimeFractionalPercent{
-				DefaultValue: translateIntegerToFractionalPercent((int32(in.MirrorPercent.GetValue()))),
+				DefaultValue: translateIntegerToFractionalPercent(int32(in.MirrorPercent.GetValue())),
 			}
 		}
 		// If zero percent is provided explicitly, we should not mirror.
@@ -1291,7 +1318,7 @@ func GetRouteOperation(in *route.Route, vsName string, port int) string {
 }
 
 // BuildDefaultHTTPInboundRoute builds a default inbound route.
-func BuildDefaultHTTPInboundRoute(proxy *model.Proxy, clusterName string, operation string, protocol protocol.Instance) *route.Route {
+func BuildDefaultHTTPInboundRoute(clusterName string, operation string, protocol protocol.Instance, mesh *meshconfig.MeshConfig) *route.Route {
 	out := buildDefaultHTTPRoute(clusterName, operation)
 	// For inbound, configure with notimeout.
 	out.GetRoute().Timeout = Notimeout
@@ -1301,14 +1328,10 @@ func BuildDefaultHTTPInboundRoute(proxy *model.Proxy, clusterName string, operat
 		// gRPC requests time out like any other requests using timeout or its default.
 		GrpcTimeoutHeaderMax: Notimeout,
 	}
-	// "reset-before-request" does not work well for gRPC streaming services.
+	// The default "reset-before-request" condition does not work well for gRPC streaming services,
+	// so inbound retries are never configured for gRPC ports.
 	if !protocol.IsGRPC() {
-		out.GetRoute().RetryPolicy = &route.RetryPolicy{
-			RetryOn: "reset-before-request",
-			NumRetries: &wrapperspb.UInt32Value{
-				Value: 2,
-			},
-		}
+		out.GetRoute().RetryPolicy = retry.ConvertInboundPolicy(mesh.GetDefaultInboundHttpRetryPolicy())
 	}
 	return out
 }
@@ -1464,7 +1487,7 @@ func portLevelSettingsConsistentHash(dst *networking.Destination,
 	return nil
 }
 
-func consistentHashToHashPolicy(consistentHash *networking.LoadBalancerSettings_ConsistentHashLB) *route.RouteAction_HashPolicy {
+func ConsistentHashToHashPolicy(consistentHash *networking.LoadBalancerSettings_ConsistentHashLB) *route.RouteAction_HashPolicy {
 	switch consistentHash.GetHashKey().(type) {
 	case *networking.LoadBalancerSettings_ConsistentHashLB_HttpHeaderName:
 		return &route.RouteAction_HashPolicy{

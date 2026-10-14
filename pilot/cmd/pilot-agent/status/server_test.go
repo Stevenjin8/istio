@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
@@ -530,6 +533,162 @@ func TestHTTPCompressionOnStats(t *testing.T) {
 	}
 }
 
+// negotiateFormat mirrors the deprecated expfmt.NegotiateIncludingOpenMetrics.
+func negotiateFormat(h http.Header) expfmt.Format {
+	om001, _ := expfmt.NewOpenMetricsFormat(expfmt.OpenMetricsVersion_0_0_1)
+	return expfmt.NegotiateAccept(h,
+		expfmt.NewFormat(expfmt.TypeOpenMetrics),
+		om001,
+		expfmt.NewFormat(expfmt.TypeProtoDelim),
+		expfmt.NewFormat(expfmt.TypeProtoText),
+		expfmt.NewFormat(expfmt.TypeProtoCompact),
+		expfmt.NewFormat(expfmt.TypeTextPlain),
+	)
+}
+
+// TestContentTypeNegotiation verifies end-to-end Content-Type negotiation
+// through handleStats. The merger forwards the client's Accept header verbatim
+// to upstreams; each upstream negotiates its own format via the standard
+// promhttp content negotiator. The merger then emits the upstream-negotiated
+// format (proto via writeMergedProtoPath; text/OM via the byte-concat fast
+// path when all upstreams agree on text/plain).
+func TestContentTypeNegotiation(t *testing.T) {
+	envoyReg := prometheus.NewRegistry()
+	envoyCounter := promauto.With(envoyReg).NewCounter(prometheus.CounterOpts{
+		Name: "counter1",
+		Help: "help1",
+	})
+	envoyCounter.Inc()
+	envoyHandler := promhttp.HandlerFor(envoyReg, promhttp.HandlerOpts{EnableOpenMetrics: true})
+	envoyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		envoyHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(envoyServer.Close)
+	envoyPort, err := strconv.Atoi(strings.Split(envoyServer.URL, ":")[2])
+	if err != nil {
+		t.Fatalf("Failed to parse test envoy server URL %q: %v", envoyServer.URL, err)
+	}
+
+	appReg := prometheus.NewRegistry()
+	appCounter := promauto.With(appReg).NewCounter(prometheus.CounterOpts{
+		Name: "counter2",
+		Help: "help2",
+	})
+	appCounter.Inc()
+	appHandler := promhttp.HandlerFor(appReg, promhttp.HandlerOpts{EnableOpenMetrics: true})
+	appServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		appHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(appServer.Close)
+	appPort, err := strconv.Atoi(strings.Split(appServer.URL, ":")[2])
+	if err != nil {
+		t.Fatalf("Failed to parse test app server URL %q: %v", appServer.URL, err)
+	}
+
+	server := &Server{
+		prometheus: &PrometheusScrapeConfiguration{
+			Port: fmt.Sprintf("%d", appPort),
+		},
+		envoyStatsPort:  envoyPort,
+		http:            &http.Client{},
+		registry:        TestingRegistry(t),
+		maxAppBodyBytes: defaultMaxAppMetricsBodyBytes,
+	}
+
+	tests := []struct {
+		name         string
+		acceptHeader string
+		want         string
+	}{
+		{
+			name: "typical accept header without protobuf",
+			acceptHeader: "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.5," +
+				"application/openmetrics-text;version=0.0.1;q=0.4," +
+				"text/plain;version=1.0.0;escaping=allow-utf-8;q=0.3," +
+				"text/plain;version=0.0.4;q=0.2," +
+				"*/*;q=0.1",
+			want: "application/openmetrics-text",
+		},
+		{
+			name: "typical accept header without protobuf and wildcard",
+			acceptHeader: "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.4," +
+				"application/openmetrics-text;version=0.0.1;q=0.3," +
+				"text/plain;version=1.0.0;escaping=allow-utf-8;q=0.2," +
+				"text/plain;version=0.0.4;q=0.1",
+			want: "application/openmetrics-text",
+		},
+		{
+			// Protobuf passthrough for native Prometheus histograms: when the client
+			// advertises proto and both upstreams negotiate proto, the merger emits
+			// proto via writeMergedProtoPath. See #49950.
+			name: "typical accept header with protobuf",
+			acceptHeader: "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited;q=0.6," +
+				"application/openmetrics-text;version=1.0.0;escaping=allow-utf-8;q=0.5," +
+				"application/openmetrics-text;version=0.0.1;q=0.4," +
+				"text/plain;version=1.0.0;escaping=allow-utf-8;q=0.3," +
+				"text/plain;version=0.0.4;q=0.2," +
+				"*/*;q=0.1",
+			want: "application/vnd.google.protobuf",
+		},
+		{
+			name:         "protobuf only",
+			acceptHeader: "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;encoding=delimited",
+			want:         "application/vnd.google.protobuf",
+		},
+		{
+			name:         "openmetrics text only",
+			acceptHeader: "application/openmetrics-text;version=1.0.0;escaping=allow-utf-8",
+			want:         "application/openmetrics-text",
+		},
+		{
+			name: "plain text only",
+			acceptHeader: "text/plain;version=1.0.0;escaping=allow-utf-8;q=0.2," +
+				"text/plain;version=0.0.4;q=0.1",
+			want: "text/plain",
+		},
+		{
+			name:         "MIME wildcard */*",
+			acceptHeader: "*/*",
+			want:         "text/plain",
+		},
+		{
+			// `application/*` — no longer expanded to `application/openmetrics-text`
+			// since the Accept-header allow-list was removed; upstreams negotiate
+			// directly, and promhttp falls back to text on a bare MIME range.
+			name:         "MIME range application/*",
+			acceptHeader: "application/*",
+			want:         "text/plain",
+		},
+		{
+			name:         "invalid accept header",
+			acceptHeader: "/",
+			want:         "text/plain",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := &http.Request{}
+			req.Header = make(http.Header)
+			req.Header.Set("Accept", test.acceptHeader)
+			server.handleStats(rec, req)
+			res := rec.Result()
+			if res.StatusCode != http.StatusOK {
+				t.Errorf("Unexpected status code, want = %v, got = %v", http.StatusOK, res.StatusCode)
+			}
+			contentType := res.Header.Get("Content-Type")
+			mediaType, _, err := mime.ParseMediaType(contentType)
+			if err != nil {
+				t.Fatalf("Failed to parse Content-Type %q: %v", contentType, err)
+			}
+			if mediaType != test.want {
+				t.Errorf("Unexpected Content-Type, want = %q, got = %q", test.want, mediaType)
+			}
+		})
+	}
+}
+
 func TestStatsContentType(t *testing.T) {
 	appOpenMetrics := `# TYPE jvm info
 # HELP jvm VM version info
@@ -584,7 +743,7 @@ my_other_metric{} 0
 			}))
 			defer envoy.Close()
 			app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				format := expfmt.NegotiateIncludingOpenMetrics(r.Header)
+				format := negotiateFormat(r.Header)
 				var negotiatedMetrics string
 				if strings.Contains(string(format), "text/plain") {
 					negotiatedMetrics = appText004
@@ -1117,7 +1276,7 @@ my_other_metric{} 0
 	}))
 	t.Cleanup(envoyServer.Close)
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		format := expfmt.NegotiateIncludingOpenMetrics(r.Header)
+		format := negotiateFormat(r.Header)
 		var negotiatedMetrics string
 		if format == FmtText {
 			negotiatedMetrics = appText
